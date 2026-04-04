@@ -27,15 +27,19 @@ jobs:
           node-version: "20"
       - uses: Swatinem/rust-cache@v2
       - name: install codedb
+        shell: bash
         run: |
           export CODEDB_DIR="$HOME/bin"
           mkdir -p "$CODEDB_DIR"
-          curl -fsSL https://codedb.codegraff.com/install.sh | CODEDB_NO_TELEMETRY=1 sh || {
-            echo "Installer failed, trying direct download..."
-            VERSION=$(curl -fsSL https://codedb.codegraff.com/latest.json | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
-            curl -fsSL "https://codedb.codegraff.com/v${VERSION}/codedb-linux-x86_64" -o "$CODEDB_DIR/codedb"
-            chmod +x "$CODEDB_DIR/codedb"
-          }
+          VERSION=$(curl -fsSL https://codedb.codegraff.com/latest.json | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+          for attempt in 1 2 3; do
+            if curl -fsSL "https://codedb.codegraff.com/v${VERSION}/codedb-linux-x86_64" -o "$CODEDB_DIR/codedb"; then
+              break
+            fi
+            echo "Download attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          chmod +x "$CODEDB_DIR/codedb"
           echo "$CODEDB_DIR" >> "$GITHUB_PATH"
           "$CODEDB_DIR/codedb" --version
         env:
