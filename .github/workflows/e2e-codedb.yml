@@ -26,28 +26,28 @@ jobs:
         with:
           node-version: "20"
       - uses: Swatinem/rust-cache@v2
+      - name: cache codedb binary
+        id: cache-codedb
+        uses: actions/cache@v4
+        with:
+          path: ~/bin/codedb
+          key: codedb-linux-x86_64-v1
       - name: install codedb
+        if: steps.cache-codedb.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          export CODEDB_DIR="$HOME/bin"
-          mkdir -p "$CODEDB_DIR"
-          VERSION=$(curl -fsSL https://codedb.codegraff.com/latest.json | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
-          echo "Latest codedb version: ${VERSION}"
-          DOWNLOAD_URL="https://codedb.codegraff.com/v${VERSION}/codedb-linux-x86_64"
-          echo "Download URL: ${DOWNLOAD_URL}"
-          for attempt in 1 2 3; do
-            HTTP_CODE=$(curl -sL -w "%{http_code}" "$DOWNLOAD_URL" -o "$CODEDB_DIR/codedb")
-            echo "Attempt $attempt: HTTP $HTTP_CODE, file size $(wc -c < "$CODEDB_DIR/codedb") bytes"
-            if [ "$HTTP_CODE" = "200" ] && [ "$(wc -c < "$CODEDB_DIR/codedb")" -gt 1000 ]; then
-              break
-            fi
-            echo "Download attempt $attempt failed, retrying in 10s..."
-            sleep 10
-          done
-          chmod +x "$CODEDB_DIR/codedb"
-          echo "$CODEDB_DIR" >> "$GITHUB_PATH"
-          "$CODEDB_DIR/codedb" --version
+          mkdir -p "$HOME/bin"
+          VERSION=$(curl -fsSL --retry 3 --retry-delay 5 https://codedb.codegraff.com/latest.json | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+          echo "Installing codedb v${VERSION}"
+          curl -fsSL --retry 3 --retry-delay 5 "https://codedb.codegraff.com/v${VERSION}/codedb-linux-x86_64" -o "$HOME/bin/codedb"
+          chmod +x "$HOME/bin/codedb"
         env:
           CODEDB_NO_TELEMETRY: "1"
+      - name: verify codedb
+        shell: bash
+        run: |
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          chmod +x "$HOME/bin/codedb"
+          "$HOME/bin/codedb" --version
       - name: run codedb e2e tests
         run: cargo test -p bridge-e2e --test codedb_e2e_tests -- --ignored --test-threads=1
