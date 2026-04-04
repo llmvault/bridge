@@ -32,12 +32,17 @@ jobs:
           export CODEDB_DIR="$HOME/bin"
           mkdir -p "$CODEDB_DIR"
           VERSION=$(curl -fsSL https://codedb.codegraff.com/latest.json | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+          echo "Latest codedb version: ${VERSION}"
+          DOWNLOAD_URL="https://codedb.codegraff.com/v${VERSION}/codedb-linux-x86_64"
+          echo "Download URL: ${DOWNLOAD_URL}"
           for attempt in 1 2 3; do
-            if curl -fsSL "https://codedb.codegraff.com/v${VERSION}/codedb-linux-x86_64" -o "$CODEDB_DIR/codedb"; then
+            HTTP_CODE=$(curl -sL -w "%{http_code}" "$DOWNLOAD_URL" -o "$CODEDB_DIR/codedb")
+            echo "Attempt $attempt: HTTP $HTTP_CODE, file size $(wc -c < "$CODEDB_DIR/codedb") bytes"
+            if [ "$HTTP_CODE" = "200" ] && [ "$(wc -c < "$CODEDB_DIR/codedb")" -gt 1000 ]; then
               break
             fi
-            echo "Download attempt $attempt failed, retrying in 5s..."
-            sleep 5
+            echo "Download attempt $attempt failed, retrying in 10s..."
+            sleep 10
           done
           chmod +x "$CODEDB_DIR/codedb"
           echo "$CODEDB_DIR" >> "$GITHUB_PATH"
