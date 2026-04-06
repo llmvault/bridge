@@ -19,7 +19,6 @@ concurrency:
 
 jobs:
   test-e2e:
-    if: false
     name: test-e2e
     runs-on: ubuntu-latest
     steps:

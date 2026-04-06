@@ -16,7 +16,6 @@ concurrency:
 
 jobs:
   test-e2e-integration:
-    if: false
     name: test-e2e-integration
     runs-on: ubuntu-latest
     steps:
