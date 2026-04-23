@@ -270,9 +270,8 @@ fn ensure_spill_reaper_started() {
         // contexts without one (tests, sync code), skip silently.
         if tokio::runtime::Handle::try_current().is_ok() {
             tokio::spawn(async {
-                let mut interval = tokio::time::interval(Duration::from_secs(
-                    SPILL_REAPER_INTERVAL_SECS,
-                ));
+                let mut interval =
+                    tokio::time::interval(Duration::from_secs(SPILL_REAPER_INTERVAL_SECS));
                 // First tick fires immediately; skip it to avoid reaping at t=0
                 interval.tick().await;
                 loop {
