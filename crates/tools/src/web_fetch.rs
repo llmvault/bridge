@@ -26,6 +26,10 @@ const DEFAULT_MAX_LENGTH: usize = crate::truncation::MAX_BYTES;
 /// Maximum response body size (5MB).
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
+/// Maximum base64-encoded image payload embedded in tool output. Anything
+/// larger is replaced with a placeholder to avoid flooding the agent context.
+const MAX_IMAGE_BASE64_BYTES: usize = 256 * 1024;
+
 /// Result returned by the WebFetch tool.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FetchResult {
@@ -295,6 +299,21 @@ impl WebFetchTool {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
+            if b64.len() > MAX_IMAGE_BASE64_BYTES {
+                let content = format!(
+                    "[image truncated: {}, {} bytes, base64 would be {} bytes — over {}KB cap]",
+                    final_url,
+                    bytes.len(),
+                    b64.len(),
+                    MAX_IMAGE_BASE64_BYTES / 1024,
+                );
+                return Ok(FetchResult {
+                    title: Some(format!("Image ({})", content_type_str)),
+                    content,
+                    url: final_url,
+                });
+            }
+
             let content = format!("data:{};base64,{}", content_type_str, b64);
             return Ok(FetchResult {
                 title: Some(format!("Image ({})", content_type_str)),
@@ -393,6 +412,7 @@ impl WebFetchTool {
 
 /// Build the default reqwest client with standard settings.
 fn build_default_client() -> reqwest::Client {
+    // Safe: only the TLS backend init can fail, already panicked earlier if broken.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(10))

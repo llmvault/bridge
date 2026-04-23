@@ -11,7 +11,7 @@ use rig::completion::CompletionModel;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use storage::StorageHandle;
 use tokio_util::sync::CancellationToken;
 use tools::agent::{AgentTaskNotification, SubAgentToolParams, AGENT_CONTEXT};
@@ -28,6 +28,15 @@ use webhooks::EventBus;
 /// via the `RipGrep` tool for any deeper inspection. Applies uniformly to every
 /// tool: builtin, MCP, integration, skill, and subagent results.
 const TOOL_RESULT_MAX_BYTES: usize = 2048;
+
+/// Hard deadline (seconds) for a background bash task. Configurable via the
+/// `BRIDGE_BACKGROUND_BASH_TIMEOUT_SECS` env var; defaults to 30 minutes.
+fn background_bash_timeout_secs() -> u64 {
+    std::env::var("BRIDGE_BACKGROUND_BASH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1800)
+}
 
 /// Validate tool arguments against a JSON schema.
 /// Returns Ok(()) if valid, Err(message) with human-readable validation errors if not.
@@ -882,12 +891,23 @@ impl ToolCallEmitter {
         // Emit the tool result SSE event for the immediate response
         let result_json_clone = result_json.clone();
         let cancel = self.cancel.clone();
+        // Cap run_command's own internal timeout at the background hard deadline
+        // so the child process is killed via its existing kill-on-timeout path
+        // even if the outer future is raced by the select! below.
+        let bg_timeout_secs = background_bash_timeout_secs();
+        let bg_timeout_ms = bg_timeout_secs.saturating_mul(1000);
+        let effective_timeout_ms = timeout_ms.min(bg_timeout_ms);
         tokio::spawn(async move {
+            let run_fut = run_command(&command, &workdir, effective_timeout_ms);
+            let timeout_fut = tokio::time::sleep(Duration::from_secs(bg_timeout_secs));
             let result = tokio::select! {
                 _ = cancel.cancelled() => {
                     Err("Background command cancelled".to_string())
                 }
-                result = run_command(&command, &workdir, timeout_ms) => result,
+                _ = timeout_fut => {
+                    Err(format!("Background command exceeded {bg_timeout_secs}s hard deadline and was killed"))
+                }
+                result = run_fut => result,
             };
 
             let output = match result {
@@ -895,7 +915,15 @@ impl ToolCallEmitter {
                     Ok(json) => Ok(json),
                     Err(e) => Err(format!("Failed to serialize result: {e}")),
                 },
-                Err(e) => Err(e),
+                Err(e) => {
+                    // Log before potential loss (receiver may be gone)
+                    warn!(
+                        task_id = %task_id_clone,
+                        error = %e,
+                        "background bash task failed"
+                    );
+                    Err(e)
+                }
             };
 
             let notification = AgentTaskNotification {

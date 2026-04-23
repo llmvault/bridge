@@ -95,6 +95,7 @@ fn resolve_file_references(content: &str, files: &HashMap<String, String>) -> St
         return content.to_string();
     }
 
+    // Safe: tested regex literal, compiles at startup.
     let re = Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap();
     let mut result = content.to_string();
     // Collect matches first to avoid borrow issues with replacement

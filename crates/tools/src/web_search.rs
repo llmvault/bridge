@@ -36,6 +36,7 @@ impl WebSearchTool {
         let year = chrono::Utc::now().format("%Y").to_string();
         let description = include_str!("instructions/web_search.txt").replace("{{year}}", &year);
         Self {
+            // Safe: only the TLS backend init can fail, already panicked earlier if broken.
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()

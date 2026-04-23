@@ -17,6 +17,8 @@ pub struct SpiderClient {
 
 impl SpiderClient {
     pub fn new(base_url: String) -> Self {
+        // Safe: only the TLS backend init can fail, and that panics at
+        // process startup long before this point.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -550,6 +552,7 @@ impl ToolExecutor for WebTransformTool {
         }
 
         if response.content.len() == 1 {
+            // Safe: length was just checked to be 1.
             return Ok(response.content.into_iter().next().unwrap());
         }
 

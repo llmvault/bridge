@@ -37,6 +37,7 @@ impl IntegrationToolExecutor {
             tool_name,
             description,
             schema,
+            // Safe: only the TLS backend init can fail, already panicked earlier if broken.
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()

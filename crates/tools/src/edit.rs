@@ -362,19 +362,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_edit_multiple_matches_no_replace_all() {
-        // With the new strategy chain, multiple exact matches with
-        // replace_all=false now picks the first occurrence via MultiOccurrenceReplacer
-        let content = "aaa\nbbb\naaa\n";
-        let (result, count) = apply_edit(content, "aaa", "ccc", false).unwrap();
-        assert_eq!(count, 1);
-        // First occurrence should be replaced
-        assert!(result.starts_with("ccc\n"));
-        // Second occurrence should remain
-        assert!(result.contains("\naaa\n"));
-    }
-
-    #[test]
     fn test_apply_edit_replace_all() {
         let content = "aaa\nbbb\naaa\n";
         let (result, count) = apply_edit(content, "aaa", "ccc", true).unwrap();

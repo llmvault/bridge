@@ -86,6 +86,9 @@ pub async fn run_command(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // Ensure the child is killed if the run_command future is dropped
+    // (e.g. outer cancellation race); prevents orphaned processes.
+    cmd.kill_on_drop(true);
 
     // Make child a process group leader so we can kill the whole tree
     #[cfg(unix)]
@@ -252,15 +255,85 @@ impl ToolExecutor for BashTool {
 const SPILL_HEAD_BYTES: usize = 800;
 const SPILL_TAIL_BYTES: usize = 800;
 
+/// Spill files older than this are reaped by the background janitor.
+const SPILL_MAX_AGE_SECS: u64 = 60 * 60;
+/// Reaper cadence.
+const SPILL_REAPER_INTERVAL_SECS: u64 = 5 * 60;
+
+static SPILL_REAPER_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Spawn a background task (once per process) that deletes stale
+/// `bridge_bash_*.txt` spill files from the temp dir every few minutes.
+fn ensure_spill_reaper_started() {
+    SPILL_REAPER_ONCE.get_or_init(|| {
+        // Only spawn inside a tokio runtime; if we're being called from
+        // contexts without one (tests, sync code), skip silently.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async {
+                let mut interval = tokio::time::interval(Duration::from_secs(
+                    SPILL_REAPER_INTERVAL_SECS,
+                ));
+                // First tick fires immediately; skip it to avoid reaping at t=0
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    reap_stale_spill_files();
+                }
+            });
+        }
+    });
+}
+
+fn reap_stale_spill_files() {
+    let dir = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.starts_with("bridge_bash_") || !name_str.ends_with(".txt") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        if let Ok(age) = now.duration_since(mtime) {
+            if age.as_secs() > SPILL_MAX_AGE_SECS {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Set owner-only permissions (0600) on a spill file. No-op on non-Unix.
+#[cfg(unix)]
+fn set_spill_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_mode(0o600);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(not(unix))]
+fn set_spill_permissions(_path: &std::path::Path) {}
+
 fn truncate_output(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     if s.len() <= MAX_OUTPUT_BYTES {
         return s.into_owned();
     }
 
+    ensure_spill_reaper_started();
+
     // Spill full output to a temp file so the LLM can read it later
     let spill_path = std::env::temp_dir().join(format!("bridge_bash_{}.txt", uuid::Uuid::new_v4()));
     if let Ok(()) = std::fs::write(&spill_path, bytes) {
+        set_spill_permissions(&spill_path);
         let head_end = s.floor_char_boundary(s.len().min(SPILL_HEAD_BYTES));
         let head = &s[..head_end];
         let tail_start = s.ceil_char_boundary(s.len().saturating_sub(SPILL_TAIL_BYTES));
