@@ -607,10 +607,8 @@ impl LspInstaller {
         installer_checksums::verify(url, &bytes)?;
 
         // Write to a unique temp path so concurrent installs don't collide.
-        let tmp_path: PathBuf = std::env::temp_dir().join(format!(
-            "bridge-lsp-dl-{}",
-            uuid_like_scratch_name(url)
-        ));
+        let tmp_path: PathBuf =
+            std::env::temp_dir().join(format!("bridge-lsp-dl-{}", uuid_like_scratch_name(url)));
         tokio::fs::write(&tmp_path, &bytes)
             .await
             .map_err(|e| format!("write {}: {}", tmp_path.display(), e))?;

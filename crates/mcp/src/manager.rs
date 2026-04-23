@@ -339,9 +339,9 @@ mod tests {
         for _ in 0..8 {
             let m = manager.clone();
             let d = def.clone();
-            handles.push(tokio::spawn(async move {
-                m.get_or_connect("agent1", &d).await
-            }));
+            handles.push(tokio::spawn(
+                async move { m.get_or_connect("agent1", &d).await },
+            ));
         }
         for h in handles {
             let r = h.await.unwrap();

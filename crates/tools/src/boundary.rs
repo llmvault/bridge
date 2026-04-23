@@ -24,7 +24,10 @@ impl ProjectBoundary {
         // Honor BRIDGE_SANDBOX_ENABLED for callers that don't know about the
         // config struct (builtin tool registration paths, tests). Default on.
         let sandbox_enabled = match std::env::var("BRIDGE_SANDBOX_ENABLED") {
-            Ok(v) => !matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "no" | "off"),
+            Ok(v) => !matches!(
+                v.trim().to_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ),
             Err(_) => true,
         };
         Self {
@@ -229,8 +232,7 @@ mod tests {
     #[test]
     fn test_sandbox_disabled_allows_any_path() {
         let dir = tempdir().expect("create temp dir");
-        let boundary =
-            ProjectBoundary::new(dir.path().to_path_buf()).with_sandbox_enabled(false);
+        let boundary = ProjectBoundary::new(dir.path().to_path_buf()).with_sandbox_enabled(false);
 
         // With sandbox disabled, arbitrary paths are returned as-is
         let result = boundary.check("/etc/passwd");
@@ -262,7 +264,11 @@ mod tests {
         let boundary = ProjectBoundary::new(std::env::temp_dir());
         let tmp_file = std::env::temp_dir().join("bridge_test_file.txt");
         let result = boundary.check(tmp_file.to_str().unwrap());
-        assert!(result.is_ok(), "expected tmp path to be allowed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected tmp path to be allowed: {:?}",
+            result
+        );
     }
 
     #[test]
