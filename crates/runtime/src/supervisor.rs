@@ -63,6 +63,46 @@ pub struct AgentSupervisor {
 /// Default maximum concurrent LLM calls when not configured.
 const DEFAULT_MAX_CONCURRENT_LLM_CALLS: usize = 500;
 
+/// RAII cleanup for the fallible section of `create_conversation`.
+///
+/// Resources are registered BEFORE several `?`-using steps (MCP connect,
+/// build_agent, adapt_tools, subagent rebuild). Any early return would leak
+/// them. This guard unwinds them on `Drop` unless `commit()` was called.
+struct CreateConversationGuard {
+    conversation_id: String,
+    state: Arc<AgentState>,
+    event_bus: Option<Arc<EventBus>>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    mcp_cleanup: Option<(Arc<McpManager>, String)>,
+    committed: bool,
+}
+
+impl CreateConversationGuard {
+    /// Disarm cleanup and return the semaphore permit for the conversation task.
+    fn commit(&mut self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.committed = true;
+        self.permit.take()
+    }
+}
+
+impl Drop for CreateConversationGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.state.conversations.remove(&self.conversation_id);
+        if let Some(bus) = self.event_bus.take() {
+            bus.remove_sse_stream(&self.conversation_id);
+        }
+        // permit drops automatically with self.permit
+        if let Some((mgr, scope_id)) = self.mcp_cleanup.take() {
+            tokio::spawn(async move {
+                mgr.disconnect_agent(&scope_id).await;
+            });
+        }
+    }
+}
+
 impl AgentSupervisor {
     /// Create a new supervisor.
     pub fn new(mcp_manager: Arc<McpManager>, cancel: CancellationToken) -> Self {
@@ -504,7 +544,7 @@ impl AgentSupervisor {
         let event_bus = self
             .event_bus
             .clone()
-            .expect("event_bus must be set before creating conversations");
+            .ok_or_else(|| BridgeError::Internal("event_bus not initialized".to_string()))?;
         let sse_rx = event_bus.register_sse_stream(conv_id.clone(), 256);
 
         let abort_token = Arc::new(Mutex::new(CancellationToken::new()));
@@ -518,6 +558,18 @@ impl AgentSupervisor {
         let created_at = handle.created_at;
 
         state.conversations.insert(conv_id.clone(), handle);
+
+        // RAII cleanup: if any fallible step below fails, drop unwinds and removes
+        // the conversation handle, SSE stream, MCP connections, and permit. The
+        // final `guard.commit()` call disarms this before the success path.
+        let mut guard = CreateConversationGuard {
+            conversation_id: conv_id.clone(),
+            state: state.clone(),
+            event_bus: Some(event_bus.clone()),
+            permit: conversation_permit,
+            mcp_cleanup: None,
+            committed: false,
+        };
 
         if let Some(storage) = &self.storage {
             storage.create_conversation(agent_id.to_string(), conv_id.clone(), None, created_at);
@@ -712,16 +764,13 @@ impl AgentSupervisor {
         // Connect per-conversation MCP servers and merge their tools into the
         // per-conversation executor map. Scoped in McpManager under the conversation
         // UUID, which cannot collide with any agent ID. On any error in this block
-        // the partial connection state and the conversation handle are unwound
-        // before returning.
+        // the RAII guard unwinds MCP connections and the conversation handle.
         let per_conv_mcp_scope: Option<String> = match per_conversation_mcp_servers {
             Some(ref servers) if !servers.is_empty() => {
                 let scope_id = conv_id.clone();
-                if let Err(e) = self.mcp_manager.connect_agent(&scope_id, servers).await {
-                    self.mcp_manager.disconnect_agent(&scope_id).await;
-                    state.conversations.remove(&conv_id);
-                    return Err(e);
-                }
+                // Arm MCP cleanup before connecting so a partial failure still unwinds.
+                guard.mcp_cleanup = Some((self.mcp_manager.clone(), scope_id.clone()));
+                self.mcp_manager.connect_agent(&scope_id, servers).await?;
 
                 let expected: std::collections::HashSet<&str> =
                     servers.iter().map(|s| s.name.as_str()).collect();
@@ -731,8 +780,6 @@ impl AgentSupervisor {
                     connected.iter().map(|c| c.server_name()).collect();
                 for name in &expected {
                     if !connected_names.contains(name) {
-                        self.mcp_manager.disconnect_agent(&scope_id).await;
-                        state.conversations.remove(&conv_id);
                         return Err(BridgeError::InvalidRequest(format!(
                             "mcp_servers: failed to connect to '{}'",
                             name
@@ -742,23 +789,16 @@ impl AgentSupervisor {
 
                 for conn in connected {
                     let server_name = conn.server_name().to_string();
-                    let tools = match conn.list_tools().await {
-                        Ok(t) => t,
-                        Err(e) => {
-                            self.mcp_manager.disconnect_agent(&scope_id).await;
-                            state.conversations.remove(&conv_id);
-                            return Err(BridgeError::InvalidRequest(format!(
-                                "mcp_servers: failed to list tools from '{}': {}",
-                                server_name, e
-                            )));
-                        }
-                    };
+                    let tools = conn.list_tools().await.map_err(|e| {
+                        BridgeError::InvalidRequest(format!(
+                            "mcp_servers: failed to list tools from '{}': {}",
+                            server_name, e
+                        ))
+                    })?;
                     let bridged = mcp::bridge_mcp_tools(conn.clone(), tools);
                     for tool in bridged {
                         let tool_name = tool.name().to_string();
                         if tool_names.contains(&tool_name) {
-                            self.mcp_manager.disconnect_agent(&scope_id).await;
-                            state.conversations.remove(&conv_id);
                             return Err(BridgeError::InvalidRequest(format!(
                                 "mcp_servers: tool '{}' from server '{}' collides with an \
                                  existing agent tool",
@@ -811,9 +851,10 @@ impl AgentSupervisor {
 
         // Build a no-tools retry agent for recovering from empty responses.
         // Uses effective_def so it shares the API key override when present.
-        let retry_agent = Arc::new(
-            build_agent(effective_def, vec![]).expect("no-tools agent build should not fail"),
-        );
+        let retry_agent =
+            Arc::new(build_agent(effective_def, vec![]).map_err(|e| {
+                BridgeError::Internal(format!("no-tools agent build failed: {}", e))
+            })?);
         drop(def);
 
         // Check if todo tools are enabled
@@ -854,6 +895,10 @@ impl AgentSupervisor {
 
         let cleanup_mcp_manager = self.mcp_manager.clone();
         let standalone_agent = self.standalone_agent;
+
+        // All fallible setup succeeded — disarm the RAII guard and hand the
+        // semaphore permit to the conversation task for its lifetime.
+        let conversation_permit = guard.commit();
 
         state.tracker.spawn(async move {
             // Hold the conversation permit for the lifetime of the conversation.

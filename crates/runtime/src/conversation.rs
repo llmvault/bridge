@@ -437,10 +437,14 @@ pub async fn run_conversation(params: ConversationParams) {
                             history_fp = crate::history_guard::HistoryFingerprint::take(&history);
 
                             // Rebuild persisted messages from the new rig history
-                            {
-                                let mut guard = persisted_messages.lock().unwrap();
+                            // and snapshot under a single lock acquisition for storage.
+                            let persisted_snapshot = {
+                                let mut guard = persisted_messages
+                                    .lock()
+                                    .expect("persisted_messages mutex poisoned");
                                 *guard = convert_from_rig_messages(&history);
-                            }
+                                guard.clone()
+                            };
 
                             // Update immortal state
                             imm_state.current_chain_index = result.chain_index;
@@ -448,10 +452,8 @@ pub async fn run_conversation(params: ConversationParams) {
 
                             // Persist: replace messages + save chain link
                             if let Some(storage) = &storage {
-                                storage.replace_messages(
-                                    conversation_id.clone(),
-                                    persisted_messages.lock().unwrap().clone(),
-                                );
+                                storage
+                                    .replace_messages(conversation_id.clone(), persisted_snapshot);
                                 storage.save_chain_link(
                                     conversation_id.clone(),
                                     result.chain_index,
@@ -514,20 +516,20 @@ pub async fn run_conversation(params: ConversationParams) {
                     // cache-bust. Refresh the fingerprint baseline.
                     history_fp = crate::history_guard::HistoryFingerprint::take(&history);
 
-                    {
-                        let mut guard = persisted_messages.lock().unwrap();
+                    let persisted_snapshot = {
+                        let mut guard = persisted_messages
+                            .lock()
+                            .expect("persisted_messages mutex poisoned");
                         apply_compaction_to_persisted_history(
                             &mut guard,
                             &result.summary_text,
                             result.messages_compacted,
                         );
-                    }
+                        guard.clone()
+                    };
 
                     if let Some(storage) = &storage {
-                        storage.replace_messages(
-                            conversation_id.clone(),
-                            persisted_messages.lock().unwrap().clone(),
-                        );
+                        storage.replace_messages(conversation_id.clone(), persisted_snapshot);
                     }
 
                     // Fire compaction event
@@ -654,19 +656,18 @@ pub async fn run_conversation(params: ConversationParams) {
 
         history.push(rig::message::Message::user(&final_user_text));
         let persisted_user_message_clone = persisted_user_message.clone();
-        let pre_turn_len = {
-            let mut guard = persisted_messages.lock().unwrap();
+        let (pre_turn_len, persisted_snapshot) = {
+            let mut guard = persisted_messages
+                .lock()
+                .expect("persisted_messages mutex poisoned");
             let len = guard.len();
             guard.push(persisted_user_message);
-            len
+            (len, guard.clone())
         };
 
         // Persist immediately so the user message survives a crash
         if let Some(storage) = &storage {
-            storage.replace_messages(
-                conversation_id.clone(),
-                persisted_messages.lock().unwrap().clone(),
-            );
+            storage.replace_messages(conversation_id.clone(), persisted_snapshot);
         }
 
         // Signal response starting
@@ -944,7 +945,10 @@ pub async fn run_conversation(params: ConversationParams) {
                 // no assistant response was generated, so leaving it would
                 // create consecutive user messages in history.
                 history.pop();
-                persisted_messages.lock().unwrap().truncate(pre_turn_len);
+                persisted_messages
+                    .lock()
+                    .expect("persisted_messages mutex poisoned")
+                    .truncate(pre_turn_len);
                 if let Some(ref js) = journal_state {
                     js.discard_staged().await;
                 }
@@ -974,7 +978,10 @@ pub async fn run_conversation(params: ConversationParams) {
             // Timeout fired — restore history from backup
             Err(_timeout) => {
                 history = history_backup;
-                persisted_messages.lock().unwrap().truncate(pre_turn_len);
+                persisted_messages
+                    .lock()
+                    .expect("persisted_messages mutex poisoned")
+                    .truncate(pre_turn_len);
                 let elapsed = start.elapsed();
                 error!(
                     conversation_id = conversation_id,
@@ -1003,7 +1010,10 @@ pub async fn run_conversation(params: ConversationParams) {
             // Task was cancelled (oneshot sender dropped) — restore history from backup
             Ok(Err(_)) => {
                 history = history_backup;
-                persisted_messages.lock().unwrap().truncate(pre_turn_len);
+                persisted_messages
+                    .lock()
+                    .expect("persisted_messages mutex poisoned")
+                    .truncate(pre_turn_len);
                 error!(
                     conversation_id = conversation_id,
                     "agent chat task cancelled unexpectedly"
@@ -1067,7 +1077,10 @@ pub async fn run_conversation(params: ConversationParams) {
                             // as the `mem::take`'d empty Vec and silently defeats chain
                             // checks on subsequent turns.
                             history = history_backup;
-                            persisted_messages.lock().unwrap().truncate(pre_turn_len);
+                            persisted_messages
+                                .lock()
+                                .expect("persisted_messages mutex poisoned")
+                                .truncate(pre_turn_len);
                             error!(
                                 agent_id = agent_id,
                                 conversation_id = conversation_id,
@@ -1381,18 +1394,18 @@ pub async fn run_conversation(params: ConversationParams) {
                 // during the turn and replace with the canonical rig history.
                 let new_persisted_messages =
                     convert_from_rig_messages(&enriched_history[history_backup.len()..]);
-                {
-                    let mut guard = persisted_messages.lock().unwrap();
+                let persisted_snapshot = {
+                    let mut guard = persisted_messages
+                        .lock()
+                        .expect("persisted_messages mutex poisoned");
                     guard.truncate(pre_turn_len);
                     guard.push(persisted_user_message_clone);
                     guard.extend(new_persisted_messages);
-                }
+                    guard.clone()
+                };
 
                 if let Some(storage) = &storage {
-                    storage.replace_messages(
-                        conversation_id.clone(),
-                        persisted_messages.lock().unwrap().clone(),
-                    );
+                    storage.replace_messages(conversation_id.clone(), persisted_snapshot);
                 }
 
                 // Replace main history with the enriched version so that
